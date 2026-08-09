@@ -165,6 +165,7 @@ impl CommandHookRuntime {
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        self.output_spiller.cleanup();
     }
 }
 

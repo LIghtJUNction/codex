@@ -1,4 +1,5 @@
 use super::windows_common::finish_driver_spawn;
+use crate::command_temp::CommandTempDir;
 use crate::conpty::ConptyInstance;
 use crate::conpty::spawn_conpty_process_as_user;
 use crate::desktop::LaunchDesktop;
@@ -318,6 +319,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     stdin_open: bool,
     use_private_desktop: bool,
 ) -> Result<SpawnedProcess> {
+    let mut command_temp_dir = CommandTempDir::new(&mut env_map)?;
     let common = prepare_legacy_spawn_context(
         permission_profile,
         workspace_roots,
@@ -418,6 +420,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
     let hpc_for_wait = hpc_handle.clone();
     let wait_logs_base_dir = common.logs_base_dir.clone();
     std::thread::spawn(move || {
+        let mut command_temp_dir = command_temp_dir;
         let _desktop = desktop;
         let timeout = timeout_ms.map(|ms| ms as u32).unwrap_or(INFINITE);
         let wait_res = unsafe { WaitForSingleObject(pi.hProcess, timeout) };
@@ -448,6 +451,7 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
             wait_logs_base_dir.as_deref(),
             command_for_wait,
         );
+        command_temp_dir.cleanup();
     });
 
     let terminator = {

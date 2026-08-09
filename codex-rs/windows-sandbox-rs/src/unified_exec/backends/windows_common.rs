@@ -1,3 +1,4 @@
+use crate::command_temp::CommandTempDir;
 use crate::ipc_framed::EmptyPayload;
 use crate::ipc_framed::FramedMessage;
 use crate::ipc_framed::IPC_PROTOCOL_VERSION;
@@ -82,6 +83,7 @@ pub(crate) fn start_runner_stdout_reader(
     stdout_tx: broadcast::Sender<Vec<u8>>,
     stderr_tx: Option<broadcast::Sender<Vec<u8>>>,
     exit_tx: oneshot::Sender<i32>,
+    mut command_temp_dir: CommandTempDir,
 ) {
     std::thread::spawn(move || {
         loop {
@@ -94,6 +96,7 @@ pub(crate) fn start_runner_stdout_reader(
                         stderr_tx.as_ref(),
                     );
                     let _ = exit_tx.send(-1);
+                    command_temp_dir.cleanup();
                     break;
                 }
                 Err(err) => {
@@ -103,6 +106,7 @@ pub(crate) fn start_runner_stdout_reader(
                         stderr_tx.as_ref(),
                     );
                     let _ = exit_tx.send(-1);
+                    command_temp_dir.cleanup();
                     break;
                 }
             };
@@ -126,11 +130,13 @@ pub(crate) fn start_runner_stdout_reader(
                 }
                 Message::Exit { payload } => {
                     let _ = exit_tx.send(payload.exit_code);
+                    command_temp_dir.cleanup();
                     break;
                 }
                 Message::Error { payload } => {
                     send_runner_error(&payload.message, &stdout_tx, stderr_tx.as_ref());
                     let _ = exit_tx.send(-1);
+                    command_temp_dir.cleanup();
                     break;
                 }
                 Message::SpawnReady { .. }

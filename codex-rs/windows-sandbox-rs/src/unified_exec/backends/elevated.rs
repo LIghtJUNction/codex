@@ -3,6 +3,7 @@ use super::windows_common::make_runner_resizer;
 use super::windows_common::start_runner_pipe_writer;
 use super::windows_common::start_runner_stdin_writer;
 use super::windows_common::start_runner_stdout_reader;
+use crate::command_temp::CommandTempDir;
 use crate::identity::SandboxCreds;
 use crate::identity::refresh_logon_sandbox_creds;
 use crate::ipc_framed::EmptyPayload;
@@ -128,6 +129,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     stdin_open: bool,
     use_private_desktop: bool,
 ) -> Result<SpawnedProcess> {
+    let command_temp_dir = CommandTempDir::new(&mut env_map)?;
     let deny_read_paths_override = deny_read_paths_override
         .iter()
         .map(AbsolutePathBuf::to_path_buf)
@@ -217,6 +219,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         stdout_tx,
         stderr_rx.as_ref().map(|(tx, _rx)| tx.clone()),
         exit_tx,
+        command_temp_dir,
     );
 
     Ok(finish_driver_spawn(

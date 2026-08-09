@@ -23,6 +23,7 @@ use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
+use crate::launcher::preferred_bwrap_supports_tmp_overlay;
 use crate::proxy_routing::activate_proxy_routes_in_netns;
 use crate::proxy_routing::prepare_host_proxy_route_spec;
 use codex_protocol::error::Result as CodexResult;
@@ -346,6 +347,7 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        enable_ephemeral_gnupg_overlay: preferred_bwrap_supports_tmp_overlay(),
         ..Default::default()
     };
     let mut bwrap_args = build_bwrap_argv(

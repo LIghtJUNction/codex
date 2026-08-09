@@ -95,6 +95,9 @@ mod deny_read_resolver;
 mod conpty;
 
 #[cfg(target_os = "windows")]
+mod command_temp;
+
+#[cfg(target_os = "windows")]
 mod elevated;
 
 #[cfg(target_os = "windows")]
@@ -512,6 +515,7 @@ mod windows_impl {
         additional_deny_write_paths: &[AbsolutePathBuf],
         use_private_desktop: bool,
     ) -> Result<CaptureResult> {
+        let mut command_temp_dir = super::command_temp::CommandTempDir::new(&mut env_map)?;
         let additional_deny_read_paths = additional_deny_read_paths
             .iter()
             .map(AbsolutePathBuf::to_path_buf)
@@ -701,6 +705,7 @@ mod windows_impl {
         let _ = t_err.join();
         let stdout = rx_out.recv().unwrap_or_default();
         let stderr = rx_err.recv().unwrap_or_default();
+        command_temp_dir.cleanup();
         let exit_code = if timed_out {
             128 + 64
         } else {

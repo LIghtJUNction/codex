@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -25,12 +26,14 @@ enum BubblewrapLauncher {
 struct SystemBwrapLauncher {
     program: AbsolutePathBuf,
     supports_argv0: bool,
+    supports_tmp_overlay: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SystemBwrapCapabilities {
     supports_argv0: bool,
     supports_perms: bool,
+    supports_tmp_overlay: bool,
 }
 
 pub(crate) fn exec_bwrap(argv: Vec<String>, preserved_files: Vec<File>) -> ! {
@@ -81,6 +84,7 @@ fn system_bwrap_launcher_for_path_with_probe(
     let Some(SystemBwrapCapabilities {
         supports_argv0,
         supports_perms: true,
+        supports_tmp_overlay,
     }) = system_bwrap_capabilities(system_bwrap_path)
     else {
         return None;
@@ -95,6 +99,7 @@ fn system_bwrap_launcher_for_path_with_probe(
     Some(SystemBwrapLauncher {
         program: system_bwrap_path,
         supports_argv0,
+        supports_tmp_overlay,
     })
 }
 
@@ -102,6 +107,14 @@ pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => launcher.supports_argv0,
         BubblewrapLauncher::Bundled(_) | BubblewrapLauncher::Unavailable => true,
+    }
+}
+
+pub(crate) fn preferred_bwrap_supports_tmp_overlay() -> bool {
+    match preferred_bwrap_launcher() {
+        BubblewrapLauncher::System(launcher) => launcher.supports_tmp_overlay,
+        BubblewrapLauncher::Bundled(_) => true,
+        BubblewrapLauncher::Unavailable => false,
     }
 }
 
@@ -117,9 +130,15 @@ fn system_bwrap_capabilities(system_bwrap_path: &Path) -> Option<SystemBwrapCapa
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let is_setuid =
+        std::fs::metadata(system_bwrap_path).is_ok_and(|metadata| metadata.mode() & 0o4000 != 0);
+    let supports_overlay_src = stdout.contains("--overlay-src") || stderr.contains("--overlay-src");
+    let supports_tmp_overlay_flag =
+        stdout.contains("--tmp-overlay") || stderr.contains("--tmp-overlay");
     Some(SystemBwrapCapabilities {
         supports_argv0: stdout.contains("--argv0") || stderr.contains("--argv0"),
         supports_perms: stdout.contains("--perms") || stderr.contains("--perms"),
+        supports_tmp_overlay: !is_setuid && supports_overlay_src && supports_tmp_overlay_flag,
     })
 }
 
@@ -168,11 +187,13 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: true,
                     supports_perms: true,
+                    supports_tmp_overlay: true,
                 })
             }),
             Some(SystemBwrapLauncher {
                 program: expected,
                 supports_argv0: true,
+                supports_tmp_overlay: true,
             })
         );
     }
@@ -187,11 +208,13 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: false,
                     supports_perms: true,
+                    supports_tmp_overlay: true,
                 })
             }),
             Some(SystemBwrapLauncher {
                 program: AbsolutePathBuf::from_absolute_path(fake_bwrap_path).expect("absolute"),
                 supports_argv0: false,
+                supports_tmp_overlay: true,
             })
         );
     }
@@ -205,6 +228,7 @@ mod tests {
                 Some(SystemBwrapCapabilities {
                     supports_argv0: false,
                     supports_perms: false,
+                    supports_tmp_overlay: false,
                 })
             }),
             None

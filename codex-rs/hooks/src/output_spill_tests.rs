@@ -7,12 +7,26 @@ use tempfile::tempdir;
 fn hook_output_spiller_is_scoped_to_its_thread() {
     let thread_id = ThreadId::new();
     let spiller = HookOutputSpiller::new(thread_id);
+    let thread_name = thread_id.to_string();
 
     assert_eq!(
-        spiller.output_dir,
-        AbsolutePathBuf::resolve_path_against_base(std::env::temp_dir(), "/")
-            .join(HOOK_OUTPUTS_DIR)
-            .join(thread_id.to_string())
+        spiller.output_dir.file_name(),
+        Some(std::ffi::OsStr::new(&thread_name))
+    );
+    assert_eq!(
+        spiller
+            .output_dir
+            .parent()
+            .and_then(|path| path.file_name()),
+        Some(std::ffi::OsStr::new(HOOK_OUTPUTS_DIR))
+    );
+    assert!(
+        spiller
+            .output_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.file_name())
+            .is_some_and(|name| name.to_string_lossy().starts_with(OUTPUT_SPILL_DIR_PREFIX))
     );
 }
 
@@ -22,6 +36,8 @@ async fn small_hook_output_remains_inline() -> Result<()> {
     let output_dir = AbsolutePathBuf::from_absolute_path(dir.path())?.join(HOOK_OUTPUTS_DIR);
     let spiller = HookOutputSpiller {
         output_dir: output_dir.clone(),
+        guard: None,
+        spill_enabled: true,
     };
 
     let output = spiller.maybe_spill_text("short".to_string()).await;
@@ -36,7 +52,11 @@ async fn large_hook_output_spills_to_file() -> Result<()> {
     let dir = tempdir()?;
     let text = "hook output ".repeat(1_000);
     let output_dir = AbsolutePathBuf::from_absolute_path(dir.path())?.join(HOOK_OUTPUTS_DIR);
-    let spiller = HookOutputSpiller { output_dir };
+    let spiller = HookOutputSpiller {
+        output_dir,
+        guard: None,
+        spill_enabled: true,
+    };
 
     let output = spiller.maybe_spill_text(text.clone()).await;
 
@@ -56,7 +76,11 @@ async fn additional_contexts_apply_limits_individually() -> Result<()> {
     let unlimited_text = "unlimited hook output ".repeat(5_000);
     assert!(approx_token_count(&unlimited_text) > 10_000);
     let output_dir = AbsolutePathBuf::from_absolute_path(dir.path())?.join(HOOK_OUTPUTS_DIR);
-    let spiller = HookOutputSpiller { output_dir };
+    let spiller = HookOutputSpiller {
+        output_dir,
+        guard: None,
+        spill_enabled: true,
+    };
     let output = spiller
         .maybe_spill_additional_contexts(vec![
             AdditionalContext {
@@ -79,5 +103,52 @@ async fn additional_contexts_apply_limits_individually() -> Result<()> {
     assert!(limited_output.contains("Full hook output saved to:"));
     assert_eq!(zero_limit_output, &unlimited_text);
     assert_eq!(high_limit_output, &unlimited_text);
+    Ok(())
+}
+
+#[test]
+fn owned_spill_directory_is_removed_when_spiller_is_dropped() -> Result<()> {
+    let temp_root = tempdir()?;
+    let thread_id = ThreadId::new();
+    let (root, lock_file) = create_spill_directory(temp_root.path())?;
+    let spiller = HookOutputSpiller::from_guard(thread_id, root, lock_file);
+    let owned_root = spiller
+        .output_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .context("owned root")?
+        .to_path_buf();
+    assert!(owned_root.exists());
+
+    drop(spiller);
+
+    assert!(!owned_root.exists());
+    Ok(())
+}
+
+#[test]
+fn stale_spill_directories_are_removed_only_with_an_unlocked_codex_lock() -> Result<()> {
+    let temp_root = tempdir()?;
+    let stale_root = temp_root
+        .path()
+        .join(format!("{OUTPUT_SPILL_DIR_PREFIX}stale"));
+    std::fs::create_dir(&stale_root)?;
+    std::fs::File::create(stale_root.join(OUTPUT_SPILL_LOCK_FILENAME))?;
+
+    let live_root = temp_root
+        .path()
+        .join(format!("{OUTPUT_SPILL_DIR_PREFIX}live"));
+    std::fs::create_dir(&live_root)?;
+    let live_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(live_root.join(OUTPUT_SPILL_LOCK_FILENAME))?;
+    live_lock.try_lock()?;
+
+    cleanup_stale_output_dirs(temp_root.path());
+
+    assert!(!stale_root.exists());
+    assert!(live_root.exists());
     Ok(())
 }

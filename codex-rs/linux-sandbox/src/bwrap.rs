@@ -70,6 +70,10 @@ pub(crate) struct BwrapOptions {
     /// Keep this uncapped by default so existing nested deny-read matches are
     /// masked before the sandboxed command starts.
     pub glob_scan_max_depth: Option<usize>,
+    /// Whether to give the read-only profile an ephemeral overlay for the
+    /// user's GnuPG home. This lets GnuPG create lock files without making
+    /// any host-side changes.
+    pub enable_ephemeral_gnupg_overlay: bool,
 }
 
 impl Default for BwrapOptions {
@@ -78,6 +82,7 @@ impl Default for BwrapOptions {
             mount_proc: true,
             network_mode: BwrapNetworkMode::FullAccess,
             glob_scan_max_depth: None,
+            enable_ephemeral_gnupg_overlay: false,
         }
     }
 }
@@ -308,17 +313,27 @@ fn create_bwrap_flags(
     command_cwd: &Path,
     options: BwrapOptions,
 ) -> Result<BwrapArgs> {
+    let gnupg_home = if options.enable_ephemeral_gnupg_overlay {
+        std::env::var_os("GNUPGHOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gnupg")))
+    } else {
+        None
+    };
     let BwrapArgs {
         args: filesystem_args,
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
-    } = create_filesystem_args(
+    } = create_filesystem_args_with_options(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
         options
             .glob_scan_max_depth
             .or(file_system_sandbox_policy.glob_scan_max_depth),
+        options.enable_ephemeral_gnupg_overlay,
+        gnupg_home.as_deref(),
     )?;
     let normalized_command_cwd = normalize_command_cwd_for_bwrap(command_cwd);
     let mut args = Vec::new();
@@ -375,6 +390,22 @@ fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
     glob_scan_max_depth: Option<usize>,
+) -> Result<BwrapArgs> {
+    create_filesystem_args_with_options(
+        file_system_sandbox_policy,
+        cwd,
+        glob_scan_max_depth,
+        /*enable_ephemeral_gnupg_overlay*/ false,
+        /*gnupg_home*/ None,
+    )
+}
+
+fn create_filesystem_args_with_options(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    glob_scan_max_depth: Option<usize>,
+    enable_ephemeral_gnupg_overlay: bool,
+    gnupg_home: Option<&Path>,
 ) -> Result<BwrapArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
@@ -444,7 +475,7 @@ fn create_filesystem_args(
     unreadable_roots.sort();
     unreadable_roots.dedup();
 
-    let args = if file_system_sandbox_policy.has_full_disk_read_access() {
+    let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
         // creates the standard minimal nodes: null, zero, full, random,
@@ -517,6 +548,12 @@ fn create_filesystem_args(
 
         args
     };
+    if enable_ephemeral_gnupg_overlay
+        && file_system_sandbox_policy.has_full_disk_read_access()
+        && writable_roots.is_empty()
+    {
+        append_ephemeral_gnupg_overlay_args(&mut args, gnupg_home);
+    }
     let mut bwrap_args = BwrapArgs {
         args,
         preserved_files: Vec::new(),
@@ -946,6 +983,37 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// Add a copy-on-write mount for GnuPG's home directory when the filesystem
+/// policy is otherwise read-only. GnuPG needs to create lock files while
+/// inspecting a keyring; keeping the overlay scoped to this directory avoids
+/// weakening the read-only policy for the rest of the user's home.
+fn append_ephemeral_gnupg_overlay_args(args: &mut Vec<String>, gnupg_home: Option<&Path>) {
+    let Some(gnupg) = gnupg_home else {
+        return;
+    };
+    if !gnupg.is_absolute() {
+        return;
+    }
+
+    let Ok(metadata) = fs::symlink_metadata(&gnupg) else {
+        return;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return;
+    }
+    // Do not mount through a symlinked component. The overlay source and
+    // destination must describe the same logical path for the read-only root
+    // to remain fail-closed.
+    if canonical_target_if_symlinked_path(&gnupg).is_some() {
+        return;
+    }
+
+    args.push("--overlay-src".to_string());
+    args.push(path_to_string(&gnupg));
+    args.push("--tmp-overlay".to_string());
+    args.push(path_to_string(&gnupg));
+}
+
 fn path_depth(path: &Path) -> usize {
     path.components().count()
 }
@@ -1349,6 +1417,53 @@ mod tests {
     #[test]
     fn default_unreadable_glob_scan_has_no_depth_cap() {
         assert_eq!(BwrapOptions::default().glob_scan_max_depth, None);
+    }
+
+    #[test]
+    fn read_only_filesystem_gets_a_scoped_ephemeral_gnupg_overlay() {
+        let home = TempDir::new().expect("home tempdir");
+        let gnupg = home.path().join(".gnupg");
+        std::fs::create_dir(&gnupg).expect("create gnupg directory");
+        let policy = FileSystemSandboxPolicy::read_only();
+
+        let args = create_filesystem_args_with_options(
+            &policy,
+            Path::new("/"),
+            NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH,
+            /*enable_ephemeral_gnupg_overlay*/ true,
+            /*gnupg_home*/ Some(&gnupg),
+        )
+        .expect("filesystem args");
+
+        let expected = vec![
+            "--overlay-src".to_string(),
+            gnupg.to_str().expect("gnupg path").to_string(),
+            "--tmp-overlay".to_string(),
+            gnupg.to_str().expect("gnupg path").to_string(),
+        ];
+        assert!(
+            args.args
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice())
+        );
+    }
+
+    #[test]
+    fn ephemeral_gnupg_overlay_skips_symlinked_homes() {
+        let home = TempDir::new().expect("home tempdir");
+        let real_home = TempDir::new().expect("real home tempdir");
+        std::fs::create_dir(real_home.path().join(".gnupg")).expect("create gnupg directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real_home.path(), home.path().join("linked-home"))
+            .expect("create home symlink");
+
+        let mut args = Vec::new();
+        #[cfg(unix)]
+        append_ephemeral_gnupg_overlay_args(
+            &mut args,
+            /*gnupg_home*/ Some(&home.path().join("linked-home").join(".gnupg")),
+        );
+        assert!(args.is_empty());
     }
 
     fn unreadable_glob_entry(pattern: String) -> FileSystemSandboxEntry {

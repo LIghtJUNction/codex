@@ -27,7 +27,7 @@ fn renders_sandbox_mode_text() {
             NetworkAccess::Restricted,
             /*permission_messages*/ None,
         ),
-        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted."
+        "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files; supported Linux bubblewrap may use a discarded temporary overlay for GnuPG lock state. Network access is restricted."
     );
 
     assert_eq!(

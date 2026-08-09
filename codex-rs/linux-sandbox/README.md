@@ -49,6 +49,10 @@ commands that would enter the bubblewrap path.
 - When bubblewrap is active, the helper applies `PR_SET_NO_NEW_PRIVS` and a
   seccomp network filter in-process.
 - When bubblewrap is active, the filesystem is read-only by default via `--ro-bind / /`.
+- In the read-only profile, a supported non-setuid bubblewrap may add a
+  copy-on-write `--tmp-overlay` only for `~/.gnupg`; GnuPG can create lock
+  files there, while the ephemeral upper layer is discarded at shutdown (or by
+  the next startup's stale-directory sweep).
 - When bubblewrap is active, writable roots are layered with `--bind <root> <root>`.
 - When bubblewrap is active, protected subpaths under writable roots (for
   example `.git`,

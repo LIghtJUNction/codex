@@ -39,7 +39,7 @@ async fn codex_err_debug_preserves_legacy_shape() {
 #[test]
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
-        (CodexErr::ServerOverloaded, false),
+        (CodexErr::ServerOverloaded, true),
         (CodexErr::new(CodexErrorDetails::ContentFilter), true),
         (
             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
@@ -91,6 +91,14 @@ fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
         assert!(expected_millis.contains(&delay.as_millis()));
     }
     assert_eq!(error.server_retry_delay(), None);
+
+    let capacity_error = CodexErr::ServerOverloaded;
+    for retry_count in [1, 3] {
+        assert!(
+            capacity_error.retry_delay(retry_count).is_some(),
+            "capacity errors without Retry-After must still be retryable"
+        );
+    }
 
     let advice = Duration::ZERO;
     let retry_after = RetryAfter::from_delay(advice).expect("retry deadline");

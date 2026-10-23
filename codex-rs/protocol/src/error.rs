@@ -445,9 +445,14 @@ impl CodexErr {
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
-            CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
+            // A model-capacity response is transient even when the backend omits
+            // `Retry-After`.  Treat it like the other retryable transport/server
+            // failures and use the bounded exponential backoff fallback.
+            CodexErrorDetails::ServerOverloaded => Some(
                 self.server_retry_delay()
-            }
+                    .unwrap_or_else(|| backoff(retry_count)),
+            ),
+            CodexErrorDetails::RetryLimit(_) => self.server_retry_delay(),
             CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
